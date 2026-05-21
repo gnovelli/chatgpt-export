@@ -421,49 +421,53 @@
       var jsonBytes = new TextEncoder().encode(jsonStr);
       log('Conversations: ' + conversations.length + ' (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB JSON)');
 
-      if (options.includeAttachments && fileIds.length > 0) {
-        // Fetch all attachments and bundle into a single ZIP with the JSON
-        sendMsg('export-status', { text: 'Downloading attachments...' });
+      log('Attachments found: ' + fileIds.length);
+
+      if (options.includeAttachments) {
+        // When the checkbox is active, always produce a ZIP — even if no
+        // attachments were found (ZIP will contain only the JSON in that case).
         var zipEntries = [{ name: baseName + '.json', data: jsonBytes }];
         var downloaded = 0;
         var attachErrors = 0;
 
-        for (var f = 0; f < fileIds.length; f++) {
-          var fid  = fileIds[f];
-          var fname = fileAttachments[fid].name;
-          try {
-            var fresp = await fetchRetry(CONFIG.BASE_URL + '/files/' + fid + '/download', headers);
-            var ct = fresp.headers.get('content-type');
-            var fileData;
-            if (ct && ct.includes('application/json')) {
-              var jdata = await fresp.json();
-              if (jdata.download_url) {
-                var dlResp = await fetch(jdata.download_url);
-                fileData = new Uint8Array(await dlResp.arrayBuffer());
+        if (fileIds.length > 0) {
+          sendMsg('export-status', { text: 'Downloading attachments...' });
+          for (var f = 0; f < fileIds.length; f++) {
+            var fid   = fileIds[f];
+            var fname = fileAttachments[fid].name;
+            try {
+              var fresp = await fetchRetry(CONFIG.BASE_URL + '/files/' + fid + '/download', headers);
+              var ct = fresp.headers.get('content-type');
+              var fileData;
+              if (ct && ct.includes('application/json')) {
+                var jdata = await fresp.json();
+                if (jdata.download_url) {
+                  var dlResp = await fetch(jdata.download_url);
+                  fileData = new Uint8Array(await dlResp.arrayBuffer());
+                }
+              } else {
+                fileData = new Uint8Array(await fresp.arrayBuffer());
               }
-            } else {
-              fileData = new Uint8Array(await fresp.arrayBuffer());
+              if (fileData) {
+                zipEntries.push({ name: 'attachments/' + fname, data: fileData });
+                downloaded++;
+              }
+            } catch (e) {
+              attachErrors++;
             }
-            if (fileData) {
-              zipEntries.push({ name: 'attachments/' + fname, data: fileData });
-              downloaded++;
-            }
-          } catch (e) {
-            attachErrors++;
+            sendMsg('export-progress', { current: f + 1, total: fileIds.length });
+            log('(' + (f + 1) + '/' + fileIds.length + ') ' + fname);
+            await sleep(CONFIG.DELAY_ATTACHMENTS);
           }
-          sendMsg('export-progress', { current: f + 1, total: fileIds.length });
-          log('(' + (f + 1) + '/' + fileIds.length + ') ' + fname);
-          await sleep(CONFIG.DELAY_ATTACHMENTS);
+          log('Attachments: ' + downloaded + ' OK, ' + attachErrors + ' failed.');
         }
 
-        log('Attachments: ' + downloaded + ' OK, ' + attachErrors + ' failed. Building ZIP...');
         sendMsg('export-status', { text: 'Building ZIP...' });
-
         var zipData = makeZip(zipEntries);
         triggerDownload(new Blob([zipData], { type: 'application/zip' }), baseName + '.zip');
         log('ZIP: ' + Math.round(zipData.length / 1024 / 1024) + ' MB → ' + baseName + '.zip');
       } else {
-        // No attachments: download JSON directly
+        // Checkbox not active: plain JSON only
         triggerDownload(new Blob([jsonStr], { type: 'application/json' }), baseName + '.json');
         log('Downloaded: ' + baseName + '.json');
       }
