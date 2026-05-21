@@ -94,6 +94,22 @@
 
   // ── Utilities ──────────────────────────────────────────────
 
+  function formatTimestamp(date) {
+    return date.getFullYear().toString() +
+      String(date.getMonth() + 1).padStart(2, '0') +
+      String(date.getDate()).padStart(2, '0') + '-' +
+      String(date.getHours()).padStart(2, '0') +
+      String(date.getMinutes()).padStart(2, '0') +
+      String(date.getSeconds()).padStart(2, '0');
+  }
+
+  function formatConvDate(unixSeconds) {
+    var d = new Date(unixSeconds * 1000);
+    return d.getFullYear().toString() +
+      String(d.getMonth() + 1).padStart(2, '0') +
+      String(d.getDate()).padStart(2, '0');
+  }
+
   function sleep(ms) {
     return new Promise(function (resolve) {
       setTimeout(resolve, ms);
@@ -159,28 +175,81 @@
 
     sendLog('Authenticated.' + (accountId ? ' Workspace: ' + accountId : ' Personal account.'));
 
-    // Step 2: List all conversations
+    // Step 2: List conversations – only fetch the pages needed for the range.
+    // The API returns conversations newest-first; oldest conversations are at the
+    // end of pagination. We read the total from the first response and jump to the
+    // relevant pages. For the macOS app there is no range yet (fromIndex/toIndex
+    // come from options and default to 0 = all), so canOptimize is false and we
+    // fall back to fetching all pages.
     sendStatus('listing');
     sendLog('Fetching conversation list...');
 
     var allMeta = [];
-    var offset = 0;
+    var fromIndex = (options && options.fromIndex) ? options.fromIndex : 1;
+    var toIndex   = (options && options.toIndex)   ? options.toIndex   : 0;
 
-    while (true) {
-      var listUrl = CONFIG.BASE_URL + '/conversations?offset=' + offset + '&limit=' + CONFIG.PAGE_SIZE;
-      var listResp = await fetchRetry(listUrl, headers);
-      var listData = await listResp.json();
+    var firstListResp = await fetchRetry(
+      CONFIG.BASE_URL + '/conversations?offset=0&limit=' + CONFIG.PAGE_SIZE,
+      headers
+    );
+    var firstListData = await firstListResp.json();
+    var apiTotal = typeof firstListData.total === 'number' ? firstListData.total : null;
 
-      allMeta = allMeta.concat(listData.items);
+    var canOptimize = apiTotal !== null && toIndex > 0;
+    var pageEnd = apiTotal || Infinity;
+
+    if (canOptimize) {
+      var BUFFER = CONFIG.PAGE_SIZE;
+      var pageStart = Math.max(0,
+        Math.floor((apiTotal - toIndex - BUFFER) / CONFIG.PAGE_SIZE) * CONFIG.PAGE_SIZE);
+      pageEnd = Math.min(apiTotal,
+        Math.ceil((apiTotal - fromIndex + 1 + BUFFER) / CONFIG.PAGE_SIZE) * CONFIG.PAGE_SIZE);
+
+      var nFetch = Math.ceil((pageEnd - pageStart) / CONFIG.PAGE_SIZE);
+      sendLog('Total on server: ' + apiTotal + '. Fetching ' + nFetch + '/' +
+              Math.ceil(apiTotal / CONFIG.PAGE_SIZE) + ' page(s) for range ' +
+              fromIndex + '–' + toIndex);
+      sendStats({ conversations: toIndex - fromIndex + 1, total: apiTotal });
+
+      for (var o = pageStart; o < pageEnd; o += CONFIG.PAGE_SIZE) {
+        if (o === 0) {
+          allMeta = allMeta.concat(firstListData.items);
+        } else {
+          var pr = await fetchRetry(
+            CONFIG.BASE_URL + '/conversations?offset=' + o + '&limit=' + CONFIG.PAGE_SIZE,
+            headers
+          );
+          var pd = await pr.json();
+          allMeta = allMeta.concat(pd.items);
+          if (pd.items.length < CONFIG.PAGE_SIZE) break;
+          await sleep(CONFIG.DELAY_PAGES);
+        }
+      }
+    } else {
+      allMeta = allMeta.concat(firstListData.items);
       sendLog('Found ' + allMeta.length + ' conversations...');
       sendStats({ conversations: allMeta.length });
 
-      if (listData.items.length < CONFIG.PAGE_SIZE) break;
-      offset += CONFIG.PAGE_SIZE;
-      await sleep(CONFIG.DELAY_PAGES);
+      if (firstListData.items.length >= CONFIG.PAGE_SIZE) {
+        var offset = CONFIG.PAGE_SIZE;
+        while (true) {
+          var listResp = await fetchRetry(
+            CONFIG.BASE_URL + '/conversations?offset=' + offset + '&limit=' + CONFIG.PAGE_SIZE,
+            headers
+          );
+          var listData = await listResp.json();
+          allMeta = allMeta.concat(listData.items);
+          sendLog('Found ' + allMeta.length + ' conversations...');
+          sendStats({ conversations: allMeta.length });
+          if (listData.items.length < CONFIG.PAGE_SIZE) break;
+          offset += CONFIG.PAGE_SIZE;
+          await sleep(CONFIG.DELAY_PAGES);
+        }
+      }
     }
 
-    // Archived conversations
+    // Archived conversations (paginate fully since they can't be range-optimised
+    // without a separate total count from the archived endpoint)
     if (includeArchived) {
       sendLog('Checking archived conversations...');
       var archUrl = CONFIG.BASE_URL + '/conversations?offset=0&limit=' + CONFIG.PAGE_SIZE + '&is_archived=true';
@@ -188,12 +257,10 @@
       var archData = await archResp.json();
 
       if (archData.items && archData.items.length > 0) {
-        // Paginate archived too
         allMeta = allMeta.concat(archData.items);
         sendLog('Added ' + archData.items.length + ' archived conversations.');
         sendStats({ conversations: allMeta.length });
 
-        // If there might be more archived pages
         var archOffset = CONFIG.PAGE_SIZE;
         while (archData.items.length >= CONFIG.PAGE_SIZE) {
           archUrl = CONFIG.BASE_URL + '/conversations?offset=' + archOffset + '&limit=' + CONFIG.PAGE_SIZE + '&is_archived=true';
@@ -210,7 +277,15 @@
       }
     }
 
-    sendLog('Total: ' + allMeta.length + ' conversations to export.');
+    // Sort oldest-first and apply range (with offset adjustment for partial fetches)
+    allMeta.sort(function(a, b) { return (a.create_time || 0) - (b.create_time || 0); });
+    var serverTotal  = apiTotal || allMeta.length;
+    var approxStart  = canOptimize ? Math.max(0, apiTotal - pageEnd) : 0;
+    var sliceFrom    = Math.max(0, fromIndex - 1 - approxStart);
+    var sliceTo      = toIndex > 0 ? Math.min(allMeta.length, toIndex - approxStart) : allMeta.length;
+    allMeta          = allMeta.slice(sliceFrom, sliceTo);
+
+    sendLog('Total: ' + serverTotal + ' conversations. Exporting ' + allMeta.length + '.');
 
     // Step 3: Fetch each conversation
     sendStatus('downloading', { current: 0, total: allMeta.length });
@@ -298,10 +373,20 @@
     sendStatus('packaging');
     sendLog('Building export file...');
 
+    var firstConvDate = allMeta.length > 0 ? formatConvDate(allMeta[0].create_time) : 'unknown';
+    var lastConvDate  = allMeta.length > 0 ? formatConvDate(allMeta[allMeta.length - 1].create_time) : 'unknown';
+    var exportTs = formatTimestamp(new Date());
+    var suggestedFilename = 'chatgpt-export-' + exportTs + '--' + firstConvDate + '-to-' + lastConvDate + '.json';
+
     var exportData = {
       export_time: new Date().toISOString(),
       source: 'ChatGPT Export macOS App',
       workspace_account_id: accountId || null,
+      export_range: {
+        total: allMeta.length,
+        first_conv_date: allMeta.length > 0 ? new Date(allMeta[0].create_time * 1000).toISOString() : null,
+        last_conv_date: allMeta.length > 0 ? new Date(allMeta[allMeta.length - 1].create_time * 1000).toISOString() : null,
+      },
       conversation_count: conversations.length,
       attachment_count: Object.keys(fileAttachments).length,
       errors: errors,
@@ -322,12 +407,13 @@
     // Send the data to Swift for saving via NSSavePanel
     sendExportData(jsonStr);
 
-    // Signal completion
+    // Signal completion (includes suggested filename for NSSavePanel default)
     sendDone({
       conversations: conversations.length,
       attachments: Object.keys(fileAttachments).length,
       errors: errors.length,
-      sizeMB: sizeMB
+      sizeMB: sizeMB,
+      suggestedFilename: suggestedFilename
     });
 
   } catch (err) {

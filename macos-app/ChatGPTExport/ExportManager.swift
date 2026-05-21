@@ -65,7 +65,7 @@ class ExportManager: ObservableObject {
 
         let savePanel = NSSavePanel()
         savePanel.title = "Save ChatGPT Export"
-        savePanel.nameFieldStringValue = "chatgpt-export-\(Self.dateString()).json"
+        savePanel.nameFieldStringValue = exportState.suggestedFilename ?? "chatgpt-export-\(Self.dateString()).json"
         savePanel.allowedContentTypes = [.json]
         savePanel.canCreateDirectories = true
         savePanel.isExtensionHidden = false

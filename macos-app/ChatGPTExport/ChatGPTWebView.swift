@@ -206,6 +206,9 @@ struct ChatGPTWebView: NSViewRepresentable {
                     if let sizeMB = body["sizeMB"] as? Int {
                         exportState.exportSizeMB = sizeMB
                     }
+                    if let name = body["suggestedFilename"] as? String {
+                        exportState.suggestedFilename = name
+                    }
                     exportState.phase = .done
 
                 case "exportError":

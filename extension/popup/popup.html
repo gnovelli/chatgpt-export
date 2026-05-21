@@ -96,6 +96,96 @@
       margin-top: 6px;
       text-align: center;
     }
+
+    /* History banner */
+    .history-banner {
+      display: none;
+      background: #0f2d1f;
+      border: 1px solid #10b981;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      font-size: 12px;
+    }
+    .history-banner .history-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .history-banner .history-info {
+      color: #10b981;
+      font-weight: 600;
+    }
+    .history-banner .history-sub {
+      color: #888;
+      margin-top: 4px;
+    }
+    .history-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-link {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 12px;
+      padding: 0;
+    }
+    .btn-link.continue { color: #60a5fa; }
+    .btn-link.continue:hover { text-decoration: underline; }
+    .btn-link.clear { color: #888; }
+    .btn-link.clear:hover { color: #ef4444; }
+
+    /* Range section */
+    .range-section {
+      background: #16213e;
+      border: 1px solid #2a2a4a;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 16px;
+    }
+    .range-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #888;
+      margin-bottom: 10px;
+    }
+    .range-inputs {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .range-inputs label {
+      font-size: 12px;
+      color: #888;
+      white-space: nowrap;
+    }
+    .range-inputs input[type="number"] {
+      width: 72px;
+      padding: 6px 8px;
+      background: #0d1117;
+      border: 1px solid #2a2a4a;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+      font-family: inherit;
+    }
+    .range-inputs input[type="number"]:focus {
+      outline: none;
+      border-color: #10b981;
+    }
+    .range-inputs .range-sep {
+      color: #555;
+      font-size: 13px;
+    }
+    .range-hint {
+      font-size: 11px;
+      color: #555;
+      margin-top: 8px;
+    }
+
     .btn {
       width: 100%;
       padding: 12px;
@@ -149,6 +239,16 @@
       margin-bottom: 16px;
       display: none;
     }
+    .next-batch {
+      display: none;
+      background: #16213e;
+      border: 1px solid #2a2a4a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-top: 12px;
+      font-size: 12px;
+      color: #60a5fa;
+    }
     .footer {
       text-align: center;
       margin-top: 12px;
@@ -187,6 +287,18 @@
     You must be on chatgpt.com and logged in to export.
   </div>
 
+  <!-- History banner (shown when previous exports are tracked) -->
+  <div id="historyBanner" class="history-banner">
+    <div class="history-row">
+      <span class="history-info"><span id="historyCount">0</span> conversations already exported</span>
+    </div>
+    <div class="history-sub" id="historyDate"></div>
+    <div class="history-actions">
+      <button class="btn-link continue" id="continueBtn">▶ Continue from next batch</button>
+      <button class="btn-link clear" id="clearHistoryBtn">✕ Clear history</button>
+    </div>
+  </div>
+
   <div class="status-card">
     <div class="status-label">Status</div>
     <div id="statusText" class="status-value pending">Ready</div>
@@ -210,6 +322,19 @@
     <div id="progressText" class="progress-text">0 / 0</div>
   </div>
 
+  <!-- Range section -->
+  <div class="range-section">
+    <div class="range-label">Export range (oldest → newest)</div>
+    <div class="range-inputs">
+      <label for="fromIndex">From</label>
+      <input type="number" id="fromIndex" min="1" value="1" placeholder="1">
+      <span class="range-sep">—</span>
+      <label for="toIndex">To</label>
+      <input type="number" id="toIndex" min="1" value="100" placeholder="100">
+    </div>
+    <div class="range-hint">Leave "To" blank or 0 to export all from "From" to the end.</div>
+  </div>
+
   <div class="options">
     <div class="option">
       <input type="checkbox" id="includeAttachments" checked>
@@ -221,7 +346,10 @@
     </div>
   </div>
 
-  <button id="exportBtn" class="btn btn-primary">Export All Conversations</button>
+  <button id="exportBtn" class="btn btn-primary">Export Conversations</button>
+
+  <!-- Next batch suggestion (shown after export completes) -->
+  <div id="nextBatch" class="next-batch"></div>
 
   <div id="logArea" class="log-area"></div>
 

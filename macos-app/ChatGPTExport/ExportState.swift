@@ -78,6 +78,7 @@ class ExportState: ObservableObject {
     @Published var exportData: String? = nil
     @Published var currentConversationTitle: String = ""
     @Published var exportSizeMB: Int = 0
+    @Published var suggestedFilename: String? = nil
 
     struct LogEntry: Identifiable {
         let id = UUID()
@@ -109,5 +110,6 @@ class ExportState: ObservableObject {
         exportData = nil
         currentConversationTitle = ""
         exportSizeMB = 0
+        suggestedFilename = nil
     }
 }

@@ -23,7 +23,9 @@
   }
 
   function sendMsg(type, data) {
-    chrome.runtime.sendMessage(Object.assign({ type: type }, data));
+    chrome.runtime.sendMessage(Object.assign({ type: type }, data), () => {
+      void chrome.runtime.lastError; // suppress "receiving end does not exist" when popup is closed
+    });
   }
 
   function log(msg) {
@@ -69,6 +71,22 @@
     throw new Error('Max retries exceeded');
   }
 
+  function formatTimestamp(date) {
+    return date.getFullYear().toString() +
+      String(date.getMonth() + 1).padStart(2, '0') +
+      String(date.getDate()).padStart(2, '0') + '-' +
+      String(date.getHours()).padStart(2, '0') +
+      String(date.getMinutes()).padStart(2, '0') +
+      String(date.getSeconds()).padStart(2, '0');
+  }
+
+  function formatConvDate(unixSeconds) {
+    const d = new Date(unixSeconds * 1000);
+    return d.getFullYear().toString() +
+      String(d.getMonth() + 1).padStart(2, '0') +
+      String(d.getDate()).padStart(2, '0');
+  }
+
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -89,26 +107,89 @@
       const headers = buildHeaders(token, accountId);
       log('Authenticated.' + (accountId ? ' Workspace detected.' : ' Personal account.'));
 
-      // List conversations
+      // List conversations – fetch only the pages needed for the requested range.
+      //
+      // The API returns conversations newest-first. Our range [fromIndex..toIndex]
+      // is oldest-first. So the oldest conversation (position 1) sits at the END of
+      // the API pagination (high offset). We use the total count returned by the
+      // first API response to jump straight to the right pages instead of walking
+      // all of them.
       sendMsg('export-status', { text: 'Listing...' });
       const allMeta = [];
-      let offset = 0;
 
-      while (true) {
-        const resp = await fetchRetry(
-          CONFIG.BASE_URL + '/conversations?offset=' + offset + '&limit=' + CONFIG.PAGE_SIZE,
-          headers
-        );
-        const data = await resp.json();
-        allMeta.push(...data.items);
+      const fromIndex = options.fromIndex || 1;
+      const toIndex   = options.toIndex   || 0;   // 0 means "to the end"
+
+      // Always fetch page 0 – it gives us the server-side total count for free.
+      const firstResp = await fetchRetry(
+        CONFIG.BASE_URL + '/conversations?offset=0&limit=' + CONFIG.PAGE_SIZE,
+        headers
+      );
+      const firstData = await firstResp.json();
+      const apiTotal  = typeof firstData.total === 'number' ? firstData.total : null;
+
+      // Can we skip pages?  Only when both ends of the range are known and the API
+      // told us the total.
+      const canOptimize = apiTotal !== null && toIndex > 0;
+
+      let pageEnd = apiTotal || Infinity;   // tracks the upper page boundary we fetched up to
+
+      if (canOptimize) {
+        // API offset for our 1-based oldest-first position i  =  apiTotal - i
+        // Add one page of buffer on each side to absorb the small difference between
+        // the API's update-time order and our create-time order.
+        const BUFFER = CONFIG.PAGE_SIZE;
+        const pageStart = Math.max(0,
+          Math.floor((apiTotal - toIndex - BUFFER) / CONFIG.PAGE_SIZE) * CONFIG.PAGE_SIZE);
+        pageEnd = Math.min(apiTotal,
+          Math.ceil((apiTotal - fromIndex + 1 + BUFFER) / CONFIG.PAGE_SIZE) * CONFIG.PAGE_SIZE);
+
+        const nFetch = Math.ceil((pageEnd - pageStart) / CONFIG.PAGE_SIZE);
+        const nTotal = Math.ceil(apiTotal / CONFIG.PAGE_SIZE);
+        log('Fetching ' + nFetch + '/' + nTotal + ' page(s) for range ' +
+            fromIndex + '–' + toIndex + ' of ' + apiTotal);
+        sendMsg('export-stats', { total: apiTotal });
+
+        for (let o = pageStart; o < pageEnd; o += CONFIG.PAGE_SIZE) {
+          if (o === 0) {
+            allMeta.push(...firstData.items);
+          } else {
+            const resp = await fetchRetry(
+              CONFIG.BASE_URL + '/conversations?offset=' + o + '&limit=' + CONFIG.PAGE_SIZE,
+              headers
+            );
+            const data = await resp.json();
+            allMeta.push(...data.items);
+            if (data.items.length < CONFIG.PAGE_SIZE) break;
+            await sleep(CONFIG.DELAY_PAGES);
+          }
+        }
+      } else {
+        // Range not fully specified or total unknown: fetch every page.
+        allMeta.push(...firstData.items);
         log('Found ' + allMeta.length + ' conversations...');
         sendMsg('export-stats', { conversations: allMeta.length });
-        if (data.items.length < CONFIG.PAGE_SIZE) break;
-        offset += CONFIG.PAGE_SIZE;
-        await sleep(CONFIG.DELAY_PAGES);
+
+        if (firstData.items.length >= CONFIG.PAGE_SIZE) {
+          let offset = CONFIG.PAGE_SIZE;
+          while (true) {
+            const resp = await fetchRetry(
+              CONFIG.BASE_URL + '/conversations?offset=' + offset + '&limit=' + CONFIG.PAGE_SIZE,
+              headers
+            );
+            const data = await resp.json();
+            allMeta.push(...data.items);
+            log('Found ' + allMeta.length + ' conversations...');
+            sendMsg('export-stats', { conversations: allMeta.length });
+            if (data.items.length < CONFIG.PAGE_SIZE) break;
+            offset += CONFIG.PAGE_SIZE;
+            await sleep(CONFIG.DELAY_PAGES);
+          }
+        }
       }
 
-      // Archived
+      // Archived conversations: always fetch the full first page (they are usually
+      // few and hard to range-optimise without knowing their total separately).
       if (options.includeArchived) {
         const archResp = await fetchRetry(
           CONFIG.BASE_URL + '/conversations?offset=0&limit=' + CONFIG.PAGE_SIZE + '&is_archived=true',
@@ -118,20 +199,36 @@
         if (archData.items && archData.items.length > 0) {
           allMeta.push(...archData.items);
           log('Added ' + archData.items.length + ' archived conversations.');
-          sendMsg('export-stats', { conversations: allMeta.length });
         }
       }
 
-      log('Total: ' + allMeta.length + ' conversations to export.');
+      // Sort oldest-first.
+      allMeta.sort(function (a, b) { return (a.create_time || 0) - (b.create_time || 0); });
 
-      // Fetch each conversation
+      // When we fetched only a subset of pages, allMeta[0] is NOT position 1 in the
+      // full sorted list – it starts at approximately (apiTotal - pageEnd).
+      // Adjust the slice indices accordingly.
+      const serverTotal   = apiTotal || allMeta.length;
+      const approxStart   = canOptimize ? Math.max(0, apiTotal - pageEnd) : 0;
+      const fromIdx       = Math.max(0, fromIndex - 1 - approxStart);
+      const toIdx         = toIndex > 0
+                              ? Math.min(allMeta.length, toIndex - approxStart)
+                              : allMeta.length;
+      const toExport      = allMeta.slice(fromIdx, toIdx);
+
+      log('Exporting ' + (fromIdx + approxStart + 1) + '–' + (toIdx + approxStart) +
+          ' of ' + serverTotal + ' (' + toExport.length + ' conversations)');
+      sendMsg('export-stats', { conversations: toExport.length, total: serverTotal });
+
+      // Fetch each conversation in range
       sendMsg('export-status', { text: 'Downloading...' });
       const conversations = [];
       const fileAttachments = {};
       const errors = [];
+      const exportedIds = [];
 
-      for (let i = 0; i < allMeta.length; i++) {
-        const c = allMeta[i];
+      for (let i = 0; i < toExport.length; i++) {
+        const c = toExport[i];
         try {
           const resp = await fetchRetry(CONFIG.BASE_URL + '/conversation/' + c.id, headers);
           const full = await resp.json();
@@ -140,8 +237,11 @@
             title: c.title,
             create_time: c.create_time,
             update_time: c.update_time,
+            position: fromIdx + i + 1,
             conversation: full,
           });
+
+          exportedIds.push(c.id);
 
           // Extract attachment IDs
           if (full.mapping) {
@@ -170,13 +270,13 @@
             });
           }
 
-          sendMsg('export-progress', { current: i + 1, total: allMeta.length });
+          sendMsg('export-progress', { current: i + 1, total: toExport.length });
           sendMsg('export-stats', { attachments: Object.keys(fileAttachments).length });
         } catch (err) {
           errors.push({ id: c.id, title: c.title, error: err.message });
           conversations.push({ id: c.id, title: c.title, error: err.message });
           log('Error: ' + (c.title || c.id) + ' - ' + err.message);
-          sendMsg('export-progress', { current: i + 1, total: allMeta.length });
+          sendMsg('export-progress', { current: i + 1, total: toExport.length });
         }
 
         await sleep(CONFIG.DELAY_FETCHES);
@@ -186,10 +286,20 @@
       sendMsg('export-status', { text: 'Packaging...' });
       log('Building export file...');
 
+      var firstConvDate = toExport.length > 0 ? formatConvDate(toExport[0].create_time) : 'unknown';
+      var lastConvDate  = toExport.length > 0 ? formatConvDate(toExport[toExport.length - 1].create_time) : 'unknown';
+
       var exportData = {
         export_time: new Date().toISOString(),
         source: 'chatgpt-export (github.com/hoya98/chatgpt-export)',
         workspace_account_id: accountId || null,
+        export_range: {
+          from: fromIdx + 1,
+          to: toIdx,
+          total: totalCount,
+          first_conv_date: toExport.length > 0 ? new Date(toExport[0].create_time * 1000).toISOString() : null,
+          last_conv_date: toExport.length > 0 ? new Date(toExport[toExport.length - 1].create_time * 1000).toISOString() : null,
+        },
         conversation_count: conversations.length,
         attachment_count: Object.keys(fileAttachments).length,
         errors: errors,
@@ -199,8 +309,9 @@
 
       var jsonStr = JSON.stringify(exportData, null, 2);
       var blob = new Blob([jsonStr], { type: 'application/json' });
-      var dateStr = new Date().toISOString().slice(0, 10);
-      triggerDownload(blob, 'chatgpt-export-' + dateStr + '.json');
+      var exportTs = formatTimestamp(new Date());
+      var filename = 'chatgpt-export-' + exportTs + '--' + firstConvDate + '-to-' + lastConvDate + '.json';
+      triggerDownload(blob, filename);
 
       log('Exported ' + conversations.length + ' conversations (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB)');
 
@@ -238,9 +349,18 @@
         log('Attachments: ' + downloaded + ' downloaded, ' + attachErrors + ' failed.');
       }
 
+      // Send exported IDs back to popup for persistent storage
+      sendMsg('export-ids', {
+        ids: exportedIds,
+        total: totalCount,
+        nextFrom: toIdx < totalCount ? toIdx + 1 : null,
+      });
+
       sendMsg('export-done', {
         conversations: conversations.length,
         attachments: Object.keys(fileAttachments).length,
+        nextFrom: toIdx < totalCount ? toIdx + 1 : null,
+        total: totalCount,
       });
 
     } catch (err) {

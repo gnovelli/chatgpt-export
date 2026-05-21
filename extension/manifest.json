@@ -3,7 +3,7 @@
   "name": "ChatGPT Export - Bulk Conversation Exporter",
   "description": "Export all your ChatGPT conversations including Team/Business workspaces. One click, full backup.",
   "version": "1.0.0",
-  "permissions": ["activeTab", "cookies"],
+  "permissions": ["activeTab", "cookies", "storage", "tabs"],
   "host_permissions": ["https://chatgpt.com/*"],
   "action": {
     "default_popup": "popup/popup.html",
