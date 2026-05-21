@@ -103,18 +103,27 @@
       String(date.getSeconds()).padStart(2, '0');
   }
 
-  function formatConvDate(unixSeconds) {
-    if (!unixSeconds) return 'unknown';
-    var d = new Date(unixSeconds * 1000);
+  function toUnixTime(createTime) {
+    if (!createTime) return 0;
+    if (typeof createTime === 'number') return createTime;
+    var d = new Date(createTime);
+    return isNaN(d.getTime()) ? 0 : d.getTime() / 1000;
+  }
+
+  function formatConvDate(createTime) {
+    var ts = toUnixTime(createTime);
+    if (!ts) return 'unknown';
+    var d = new Date(ts * 1000);
     if (isNaN(d.getTime())) return 'unknown';
     return d.getFullYear().toString() +
       String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
   }
 
-  function safeISODate(unixSeconds) {
-    if (!unixSeconds) return null;
-    var d = new Date(unixSeconds * 1000);
+  function safeISODate(createTime) {
+    var ts = toUnixTime(createTime);
+    if (!ts) return null;
+    var d = new Date(ts * 1000);
     return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
@@ -286,7 +295,7 @@
     }
 
     // Sort oldest-first and apply range (with offset adjustment for partial fetches)
-    allMeta.sort(function(a, b) { return (a.create_time || 0) - (b.create_time || 0); });
+    allMeta.sort(function(a, b) { return toUnixTime(a.create_time) - toUnixTime(b.create_time); });
     var serverTotal  = apiTotal || allMeta.length;
     var approxStart  = canOptimize ? Math.max(0, apiTotal - pageEnd) : 0;
     var sliceFrom    = Math.max(0, fromIndex - 1 - approxStart);
@@ -338,17 +347,36 @@
               }
             }
 
-            // Check content parts for file-service:// references
+            // Check content parts for file-service://, sediment://, and audio pointers
             if (node && node.message && node.message.content && node.message.content.parts) {
               var parts = node.message.content.parts;
               for (var p = 0; p < parts.length; p++) {
-                if (parts[p] && typeof parts[p] === 'object' && parts[p].asset_pointer) {
-                  var ptr = parts[p].asset_pointer;
+                var part = parts[p];
+                if (!part || typeof part !== 'object') continue;
+
+                if (part.asset_pointer) {
+                  var ptr = part.asset_pointer;
+                  var fid = null, fname = null;
                   if (ptr.startsWith('file-service://')) {
-                    var fid = ptr.replace('file-service://', '');
-                    if (!fileAttachments[fid]) {
-                      fileAttachments[fid] = {
-                        name: fid,
+                    fid = ptr.replace('file-service://', '');
+                    fname = fid;
+                  } else if (ptr.startsWith('sediment://')) {
+                    fid = ptr.replace('sediment://', '');
+                    fname = fid + (part.format ? '.' + part.format : '.wav');
+                  }
+                  if (fid && !fileAttachments[fid]) {
+                    fileAttachments[fid] = { name: fname, conversationId: c.id, conversationTitle: c.title };
+                  }
+                }
+
+                if (part.content_type === 'real_time_user_audio_video_asset_pointer' &&
+                    part.audio_asset_pointer && part.audio_asset_pointer.asset_pointer) {
+                  var aptr = part.audio_asset_pointer;
+                  if (aptr.asset_pointer.startsWith('sediment://')) {
+                    var fid2 = aptr.asset_pointer.replace('sediment://', '');
+                    if (!fileAttachments[fid2]) {
+                      fileAttachments[fid2] = {
+                        name: fid2 + (aptr.format ? '.' + aptr.format : '.wav'),
                         conversationId: c.id,
                         conversationTitle: c.title
                       };

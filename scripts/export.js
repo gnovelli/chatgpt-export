@@ -127,18 +127,27 @@
       String(date.getSeconds()).padStart(2, '0');
   }
 
-  function formatConvDate(unixSeconds) {
-    if (!unixSeconds) return 'unknown';
-    const d = new Date(unixSeconds * 1000);
+  function toUnixTime(createTime) {
+    if (!createTime) return 0;
+    if (typeof createTime === 'number') return createTime;
+    const d = new Date(createTime);
+    return isNaN(d.getTime()) ? 0 : d.getTime() / 1000;
+  }
+
+  function formatConvDate(createTime) {
+    const ts = toUnixTime(createTime);
+    if (!ts) return 'unknown';
+    const d = new Date(ts * 1000);
     if (isNaN(d.getTime())) return 'unknown';
     return d.getFullYear().toString() +
       String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
   }
 
-  function safeISODate(unixSeconds) {
-    if (!unixSeconds) return null;
-    const d = new Date(unixSeconds * 1000);
+  function safeISODate(createTime) {
+    const ts = toUnixTime(createTime);
+    if (!ts) return null;
+    const d = new Date(ts * 1000);
     return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
@@ -249,7 +258,7 @@
   // Step 3: Sort oldest-first and slice to the requested range.
   // When we fetched a subset of pages, allMeta[0] is not position 1 in the full
   // list – it starts at approximately (apiTotal - pageEnd). Adjust indices.
-  allMeta.sort((a, b) => (a.create_time || 0) - (b.create_time || 0));
+  allMeta.sort((a, b) => toUnixTime(a.create_time) - toUnixTime(b.create_time));
   const serverTotal = apiTotal || allMeta.length;
   const approxStart = canOptimize ? Math.max(0, apiTotal - pageEnd) : 0;
   const fromIdx     = Math.max(0, CONFIG.EXPORT_FROM - 1 - approxStart);
@@ -310,13 +319,34 @@
           if (node && node.message && node.message.content && node.message.content.parts) {
             const parts = node.message.content.parts;
             for (let p = 0; p < parts.length; p++) {
-              if (parts[p] && typeof parts[p] === 'object' && parts[p].asset_pointer) {
-                const ptr = parts[p].asset_pointer;
+              const part = parts[p];
+              if (!part || typeof part !== 'object') continue;
+
+              // file-service:// and sediment:// direct asset pointers
+              if (part.asset_pointer) {
+                const ptr = part.asset_pointer;
+                let fid = null, fname = null;
                 if (ptr.startsWith('file-service://')) {
-                  const fid = ptr.replace('file-service://', '');
-                  if (!fileAttachments[fid]) {
-                    fileAttachments[fid] = {
-                      name: fid,
+                  fid = ptr.replace('file-service://', '');
+                  fname = fid;
+                } else if (ptr.startsWith('sediment://')) {
+                  fid = ptr.replace('sediment://', '');
+                  fname = fid + (part.format ? '.' + part.format : '.wav');
+                }
+                if (fid && !fileAttachments[fid]) {
+                  fileAttachments[fid] = { name: fname, conversationId: conv.id, conversationTitle: conv.title };
+                }
+              }
+
+              // real_time_user_audio_video_asset_pointer: voice input from user
+              if (part.content_type === 'real_time_user_audio_video_asset_pointer' &&
+                  part.audio_asset_pointer && part.audio_asset_pointer.asset_pointer) {
+                const aptr = part.audio_asset_pointer;
+                if (aptr.asset_pointer.startsWith('sediment://')) {
+                  const fid2 = aptr.asset_pointer.replace('sediment://', '');
+                  if (!fileAttachments[fid2]) {
+                    fileAttachments[fid2] = {
+                      name: fid2 + (aptr.format ? '.' + aptr.format : '.wav'),
                       conversationId: conv.id,
                       conversationTitle: conv.title,
                     };

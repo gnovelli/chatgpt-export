@@ -80,18 +80,28 @@
       String(date.getSeconds()).padStart(2, '0');
   }
 
-  function formatConvDate(unixSeconds) {
-    if (!unixSeconds) return 'unknown';
-    const d = new Date(unixSeconds * 1000);
+  // create_time can be a Unix timestamp (number) or an ISO string depending on account type
+  function toUnixTime(createTime) {
+    if (!createTime) return 0;
+    if (typeof createTime === 'number') return createTime;
+    const d = new Date(createTime);
+    return isNaN(d.getTime()) ? 0 : d.getTime() / 1000;
+  }
+
+  function formatConvDate(createTime) {
+    const ts = toUnixTime(createTime);
+    if (!ts) return 'unknown';
+    const d = new Date(ts * 1000);
     if (isNaN(d.getTime())) return 'unknown';
     return d.getFullYear().toString() +
       String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
   }
 
-  function safeISODate(unixSeconds) {
-    if (!unixSeconds) return null;
-    const d = new Date(unixSeconds * 1000);
+  function safeISODate(createTime) {
+    const ts = toUnixTime(createTime);
+    if (!ts) return null;
+    const d = new Date(ts * 1000);
     return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
@@ -211,7 +221,7 @@
       }
 
       // Sort oldest-first.
-      allMeta.sort(function (a, b) { return (a.create_time || 0) - (b.create_time || 0); });
+      allMeta.sort(function (a, b) { return toUnixTime(a.create_time) - toUnixTime(b.create_time); });
 
       // When we fetched only a subset of pages, allMeta[0] is NOT position 1 in the
       // full sorted list – it starts at approximately (apiTotal - pageEnd).
@@ -264,12 +274,36 @@
               }
               if (node && node.message && node.message.content && node.message.content.parts) {
                 node.message.content.parts.forEach(function (part) {
-                  if (part && typeof part === 'object' && part.asset_pointer) {
+                  if (!part || typeof part !== 'object') return;
+
+                  // file-service:// and sediment:// direct asset pointers
+                  if (part.asset_pointer) {
                     var ptr = part.asset_pointer;
+                    var fid = null;
+                    var fname = null;
                     if (ptr.startsWith('file-service://')) {
-                      var fid = ptr.replace('file-service://', '');
-                      if (!fileAttachments[fid]) {
-                        fileAttachments[fid] = { name: fid, conversationId: c.id };
+                      fid = ptr.replace('file-service://', '');
+                      fname = fid;
+                    } else if (ptr.startsWith('sediment://')) {
+                      fid = ptr.replace('sediment://', '');
+                      fname = fid + (part.format ? '.' + part.format : '.wav');
+                    }
+                    if (fid && !fileAttachments[fid]) {
+                      fileAttachments[fid] = { name: fname, conversationId: c.id };
+                    }
+                  }
+
+                  // real_time_user_audio_video_asset_pointer: voice input from user
+                  if (part.content_type === 'real_time_user_audio_video_asset_pointer' &&
+                      part.audio_asset_pointer && part.audio_asset_pointer.asset_pointer) {
+                    var aptr = part.audio_asset_pointer;
+                    if (aptr.asset_pointer.startsWith('sediment://')) {
+                      var fid2 = aptr.asset_pointer.replace('sediment://', '');
+                      if (!fileAttachments[fid2]) {
+                        fileAttachments[fid2] = {
+                          name: fid2 + (aptr.format ? '.' + aptr.format : '.wav'),
+                          conversationId: c.id,
+                        };
                       }
                     }
                   }
