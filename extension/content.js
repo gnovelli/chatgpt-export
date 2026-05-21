@@ -452,6 +452,8 @@
       log('Conversations: ' + conversations.length + ' (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB JSON)');
 
       log('Attachments found: ' + fileIds.length);
+      sendMsg('export-status', { text: fileIds.length + ' attachments found' });
+      sendMsg('export-stats', { attachments: fileIds.length });
 
       if (options.includeAttachments) {
         // When the checkbox is active, always produce a ZIP — even if no
