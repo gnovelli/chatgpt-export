@@ -162,6 +162,37 @@
     URL.revokeObjectURL(url);
   }
 
+  // Pure-JS ZIP builder (STORE, no compression).
+  function makeZip(entries) {
+    const T = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      T[i] = c >>> 0;
+    }
+    const crc32 = buf => { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = T[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+    const w16 = n => [n & 0xFF, (n >> 8) & 0xFF];
+    const w32 = n => { const u = n >>> 0; return [u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF, (u >> 24) & 0xFF]; };
+    const cat = arrays => { const out = new Uint8Array(arrays.reduce((s, a) => s + a.length, 0)); let p = 0; for (const a of arrays) { out.set(a, p); p += a.length; } return out; };
+
+    const enc = new TextEncoder();
+    const now = new Date();
+    const dt = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const tm = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const locals = [], cdirs = [];
+    let off = 0;
+
+    for (const e of entries) {
+      const name = enc.encode(e.name), data = e.data, crc = crc32(data), sz = data.length;
+      const lh = new Uint8Array([0x50,0x4B,0x03,0x04, 0x14,0x00, 0x00,0x00, 0x00,0x00, ...w16(tm),...w16(dt),...w32(crc),...w32(sz),...w32(sz),...w16(name.length),0x00,0x00,...name]);
+      const cd = new Uint8Array([0x50,0x4B,0x01,0x02, 0x1E,0x03, 0x14,0x00, 0x00,0x00, 0x00,0x00, ...w16(tm),...w16(dt),...w32(crc),...w32(sz),...w32(sz),...w16(name.length),0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,...w32(off),...name]);
+      locals.push(lh, data); cdirs.push(cd); off += lh.length + sz;
+    }
+    const cdData = cat(cdirs);
+    const eocd = new Uint8Array([0x50,0x4B,0x05,0x06, 0x00,0x00,0x00,0x00, ...w16(entries.length),...w16(entries.length),...w32(cdData.length),...w32(off),0x00,0x00]);
+    return cat([...locals, cdData, eocd]);
+  }
+
   // ── Main Export ──────────────────────────────────────────
 
   // Show previously exported progress
@@ -368,13 +399,19 @@
     await sleep(CONFIG.DELAY_BETWEEN_FETCHES);
   }
 
-  // Step 5: Save history and build export
+  // Step 5: Save history, build JSON, bundle into ZIP if attachments requested
   saveHistory(exportedIds);
   const updatedHistory = loadHistory();
   const absTo = toIdx + approxStart;
   log('Progress saved. Total tracked: ' + updatedHistory.length + '/' + serverTotal + ' conversations.');
 
   log('Building export file...');
+  const exportTs  = formatTimestamp(new Date());
+  const firstDate = toExport.length > 0 ? formatConvDate(toExport[0].create_time) : 'unknown';
+  const lastDate  = toExport.length > 0 ? formatConvDate(toExport[toExport.length - 1].create_time) : 'unknown';
+  const baseName  = 'chatgpt-export-' + exportTs + '--' + firstDate + '-to-' + lastDate;
+  const fileIds   = Object.keys(fileAttachments);
+
   const exportData = {
     export_time: new Date().toISOString(),
     source: 'chatgpt-export (github.com/hoya98/chatgpt-export)',
@@ -387,27 +424,59 @@
       last_conv_date: toExport.length > 0 ? safeISODate(toExport[toExport.length - 1].create_time) : null,
     },
     conversation_count: fullConversations.length,
-    attachment_count: Object.keys(fileAttachments).length,
+    attachment_count: fileIds.length,
     errors: errors,
     attachments: fileAttachments,
     conversations: fullConversations,
   };
 
-  const jsonStr = JSON.stringify(exportData, null, 2);
-  const blob = new Blob([jsonStr], { type: 'application/json' });
-  const exportTs = formatTimestamp(new Date());
-  const firstDate = toExport.length > 0 ? formatConvDate(toExport[0].create_time) : 'unknown';
-  const lastDate  = toExport.length > 0 ? formatConvDate(toExport[toExport.length - 1].create_time) : 'unknown';
-  const filename = 'chatgpt-export-' + exportTs + '--' + firstDate + '-to-' + lastDate + '.json';
+  const jsonStr   = JSON.stringify(exportData, null, 2);
+  const jsonBytes = new TextEncoder().encode(jsonStr);
+  log('Conversations: ' + fullConversations.length + ' (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB JSON)');
+  log(fileIds.length + ' attachment references found.');
+  if (errors.length > 0) log(errors.length + ' conversations had errors.');
 
-  triggerDownload(blob, filename);
+  let outFilename;
 
-  const sizeMB = Math.round(jsonStr.length / 1024 / 1024);
-  log('Done! Exported ' + fullConversations.length + ' conversations (~' + sizeMB + ' MB) → ' + filename);
-  log(Object.keys(fileAttachments).length + ' attachment references found.');
-  if (errors.length > 0) {
-    log(errors.length + ' conversations had errors (see export file for details).');
+  if (fileIds.length > 0) {
+    // Fetch all attachments and bundle JSON + files into a single ZIP
+    log('Downloading ' + fileIds.length + ' attachments...');
+    const zipEntries = [{ name: baseName + '.json', data: jsonBytes }];
+    let downloaded = 0, attachErrors = 0;
+
+    for (let f = 0; f < fileIds.length; f++) {
+      const fid   = fileIds[f];
+      const fname = fileAttachments[fid].name;
+      try {
+        const fresp = await fetchWithRetry(CONFIG.BASE_URL + '/files/' + fid + '/download', headers);
+        const ct = fresp.headers.get('content-type');
+        let fileData;
+        if (ct && ct.includes('application/json')) {
+          const jdata = await fresp.json();
+          if (jdata.download_url) {
+            const dlResp = await fetch(jdata.download_url);
+            fileData = new Uint8Array(await dlResp.arrayBuffer());
+          }
+        } else {
+          fileData = new Uint8Array(await fresp.arrayBuffer());
+        }
+        if (fileData) { zipEntries.push({ name: 'attachments/' + fname, data: fileData }); downloaded++; }
+      } catch (e) { attachErrors++; }
+      log('(' + (f + 1) + '/' + fileIds.length + ') ' + fname);
+      await sleep(CONFIG.DELAY_BETWEEN_ATTACHMENTS);
+    }
+
+    log('Attachments: ' + downloaded + ' OK, ' + attachErrors + ' failed. Building ZIP...');
+    const zipData = makeZip(zipEntries);
+    outFilename = baseName + '.zip';
+    triggerDownload(new Blob([zipData], { type: 'application/zip' }), outFilename);
+    log('ZIP: ' + Math.round(zipData.length / 1024 / 1024) + ' MB → ' + outFilename);
+  } else {
+    outFilename = baseName + '.json';
+    triggerDownload(new Blob([jsonStr], { type: 'application/json' }), outFilename);
+    log('Downloaded: ' + outFilename);
   }
+
   if (absTo < serverTotal) {
     log('Next batch: set EXPORT_FROM: ' + (absTo + 1) + ', EXPORT_TO: ' + (absTo + 100));
   } else {
@@ -416,9 +485,9 @@
 
   return {
     conversations: fullConversations.length,
-    attachments: Object.keys(fileAttachments).length,
+    attachments: fileIds.length,
     errors: errors.length,
-    filename: filename,
+    filename: outFilename,
     nextFrom: absTo < serverTotal ? absTo + 1 : null,
   };
 })();

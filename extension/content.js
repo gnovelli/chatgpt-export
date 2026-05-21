@@ -116,6 +116,70 @@
     URL.revokeObjectURL(url);
   }
 
+  // Pure-JS ZIP builder (STORE, no compression). No external dependencies.
+  function makeZip(entries) {
+    // entries: [{ name: string, data: Uint8Array }]
+    const T = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+      T[i] = c >>> 0;
+    }
+    function crc32(buf) {
+      let c = 0xFFFFFFFF;
+      for (let i = 0; i < buf.length; i++) c = T[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ 0xFFFFFFFF) >>> 0;
+    }
+    function w16(n) { return [n & 0xFF, (n >> 8) & 0xFF]; }
+    function w32(n) { const u = n >>> 0; return [u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF, (u >> 24) & 0xFF]; }
+    function concat(arrays) {
+      const total = arrays.reduce((s, a) => s + a.length, 0);
+      const out = new Uint8Array(total);
+      let pos = 0;
+      for (const a of arrays) { out.set(a, pos); pos += a.length; }
+      return out;
+    }
+
+    const enc = new TextEncoder();
+    const now = new Date();
+    const dt = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const tm = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+
+    const locals = [];
+    const cdirs  = [];
+    let off = 0;
+
+    for (const e of entries) {
+      const name = enc.encode(e.name);
+      const data = e.data;
+      const crc  = crc32(data);
+      const sz   = data.length;
+
+      const lh = new Uint8Array([
+        0x50,0x4B,0x03,0x04, 0x14,0x00, 0x00,0x00, 0x00,0x00,
+        ...w16(tm), ...w16(dt), ...w32(crc), ...w32(sz), ...w32(sz),
+        ...w16(name.length), 0x00,0x00, ...name,
+      ]);
+      const cd = new Uint8Array([
+        0x50,0x4B,0x01,0x02, 0x1E,0x03, 0x14,0x00, 0x00,0x00, 0x00,0x00,
+        ...w16(tm), ...w16(dt), ...w32(crc), ...w32(sz), ...w32(sz),
+        ...w16(name.length), 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00,0x00,0x00,
+        ...w32(off), ...name,
+      ]);
+      locals.push(lh, data);
+      cdirs.push(cd);
+      off += lh.length + sz;
+    }
+
+    const cdData = concat(cdirs);
+    const eocd = new Uint8Array([
+      0x50,0x4B,0x05,0x06, 0x00,0x00, 0x00,0x00,
+      ...w16(entries.length), ...w16(entries.length),
+      ...w32(cdData.length), ...w32(off), 0x00,0x00,
+    ]);
+    return concat([...locals, cdData, eocd]);
+  }
+
   async function runExport(options) {
     try {
       sendMsg('export-status', { text: 'Authenticating...' });
@@ -324,12 +388,16 @@
         await sleep(CONFIG.DELAY_FETCHES);
       }
 
-      // Build export
+      // Build export JSON
       sendMsg('export-status', { text: 'Packaging...' });
       log('Building export file...');
 
       var firstConvDate = toExport.length > 0 ? formatConvDate(toExport[0].create_time) : 'unknown';
       var lastConvDate  = toExport.length > 0 ? formatConvDate(toExport[toExport.length - 1].create_time) : 'unknown';
+      var exportTs  = formatTimestamp(new Date());
+      var baseName  = 'chatgpt-export-' + exportTs + '--' + firstConvDate + '-to-' + lastConvDate;
+
+      var fileIds   = Object.keys(fileAttachments);
 
       var exportData = {
         export_time: new Date().toISOString(),
@@ -343,52 +411,61 @@
           last_conv_date: toExport.length > 0 ? safeISODate(toExport[toExport.length - 1].create_time) : null,
         },
         conversation_count: conversations.length,
-        attachment_count: Object.keys(fileAttachments).length,
+        attachment_count: fileIds.length,
         errors: errors,
         attachments: fileAttachments,
         conversations: conversations,
       };
 
-      var jsonStr = JSON.stringify(exportData, null, 2);
-      var blob = new Blob([jsonStr], { type: 'application/json' });
-      var exportTs = formatTimestamp(new Date());
-      var filename = 'chatgpt-export-' + exportTs + '--' + firstConvDate + '-to-' + lastConvDate + '.json';
-      triggerDownload(blob, filename);
+      var jsonStr   = JSON.stringify(exportData, null, 2);
+      var jsonBytes = new TextEncoder().encode(jsonStr);
+      log('Conversations: ' + conversations.length + ' (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB JSON)');
 
-      log('Exported ' + conversations.length + ' conversations (~' + Math.round(jsonStr.length / 1024 / 1024) + ' MB)');
-
-      // Download attachments if requested
-      if (options.includeAttachments && Object.keys(fileAttachments).length > 0) {
-        sendMsg('export-status', { text: 'Attachments...' });
-        var fileIds = Object.keys(fileAttachments);
+      if (options.includeAttachments && fileIds.length > 0) {
+        // Fetch all attachments and bundle into a single ZIP with the JSON
+        sendMsg('export-status', { text: 'Downloading attachments...' });
+        var zipEntries = [{ name: baseName + '.json', data: jsonBytes }];
         var downloaded = 0;
         var attachErrors = 0;
 
         for (var f = 0; f < fileIds.length; f++) {
-          var fid = fileIds[f];
+          var fid  = fileIds[f];
           var fname = fileAttachments[fid].name;
           try {
             var fresp = await fetchRetry(CONFIG.BASE_URL + '/files/' + fid + '/download', headers);
             var ct = fresp.headers.get('content-type');
+            var fileData;
             if (ct && ct.includes('application/json')) {
               var jdata = await fresp.json();
               if (jdata.download_url) {
                 var dlResp = await fetch(jdata.download_url);
-                var dlBlob = await dlResp.blob();
-                triggerDownload(dlBlob, fname);
+                fileData = new Uint8Array(await dlResp.arrayBuffer());
               }
             } else {
-              var fblob = await fresp.blob();
-              triggerDownload(fblob, fname);
+              fileData = new Uint8Array(await fresp.arrayBuffer());
             }
-            downloaded++;
+            if (fileData) {
+              zipEntries.push({ name: 'attachments/' + fname, data: fileData });
+              downloaded++;
+            }
           } catch (e) {
             attachErrors++;
           }
           sendMsg('export-progress', { current: f + 1, total: fileIds.length });
+          log('(' + (f + 1) + '/' + fileIds.length + ') ' + fname);
           await sleep(CONFIG.DELAY_ATTACHMENTS);
         }
-        log('Attachments: ' + downloaded + ' downloaded, ' + attachErrors + ' failed.');
+
+        log('Attachments: ' + downloaded + ' OK, ' + attachErrors + ' failed. Building ZIP...');
+        sendMsg('export-status', { text: 'Building ZIP...' });
+
+        var zipData = makeZip(zipEntries);
+        triggerDownload(new Blob([zipData], { type: 'application/zip' }), baseName + '.zip');
+        log('ZIP: ' + Math.round(zipData.length / 1024 / 1024) + ' MB → ' + baseName + '.zip');
+      } else {
+        // No attachments: download JSON directly
+        triggerDownload(new Blob([jsonStr], { type: 'application/json' }), baseName + '.json');
+        log('Downloaded: ' + baseName + '.json');
       }
 
       var absTo = toIdx + approxStart;
