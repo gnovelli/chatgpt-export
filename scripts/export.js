@@ -162,7 +162,7 @@
     URL.revokeObjectURL(url);
   }
 
-  // Pure-JS ZIP builder (STORE, no compression).
+  // Pure-JS ZIP builder (STORE, no compression). No external dependencies.
   function makeZip(entries) {
     const T = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -170,27 +170,71 @@
       for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
       T[i] = c >>> 0;
     }
-    const crc32 = buf => { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = T[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
-    const w16 = n => [n & 0xFF, (n >> 8) & 0xFF];
-    const w32 = n => { const u = n >>> 0; return [u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF, (u >> 24) & 0xFF]; };
-    const cat = arrays => { const out = new Uint8Array(arrays.reduce((s, a) => s + a.length, 0)); let p = 0; for (const a of arrays) { out.set(a, p); p += a.length; } return out; };
+    const crc32 = buf => {
+      let c = 0xFFFFFFFF;
+      for (let i = 0; i < buf.length; i++) c = T[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+      return (c ^ 0xFFFFFFFF) >>> 0;
+    };
+    const u16 = n => new Uint8Array([n & 0xFF, (n >> 8) & 0xFF]);
+    const u32 = n => { const v = n >>> 0; return new Uint8Array([v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF]); };
+    const Z2 = new Uint8Array(2);
+    const Z4 = new Uint8Array(4);
+    const cat = (...parts) => {
+      const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+      let pos = 0;
+      for (const p of parts) { out.set(p, pos); pos += p.length; }
+      return out;
+    };
 
     const enc = new TextEncoder();
     const now = new Date();
-    const dt = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
-    const tm = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const DT = u16(((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate());
+    const TM = u16((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1));
+
     const locals = [], cdirs = [];
-    let off = 0;
+    let localOff = 0;
 
     for (const e of entries) {
-      const name = enc.encode(e.name), data = e.data, crc = crc32(data), sz = data.length;
-      const lh = new Uint8Array([0x50,0x4B,0x03,0x04, 0x14,0x00, 0x00,0x00, 0x00,0x00, ...w16(tm),...w16(dt),...w32(crc),...w32(sz),...w32(sz),...w16(name.length),0x00,0x00,...name]);
-      const cd = new Uint8Array([0x50,0x4B,0x01,0x02, 0x1E,0x03, 0x14,0x00, 0x00,0x00, 0x00,0x00, ...w16(tm),...w16(dt),...w32(crc),...w32(sz),...w32(sz),...w16(name.length),0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,...w32(off),...name]);
-      locals.push(lh, data); cdirs.push(cd); off += lh.length + sz;
+      const name = enc.encode(e.name);
+      const data = e.data;
+      const CRC  = u32(crc32(data));
+      const SZ   = u32(data.length);
+      const NL   = u16(name.length);
+
+      // Local file header: 30 bytes + filename
+      const lh = cat(
+        new Uint8Array([0x50,0x4B,0x03,0x04]), u16(20), Z2, Z2,
+        TM, DT, CRC, SZ, SZ, NL, Z2,
+        name,
+      );
+      // Central directory entry: 46 bytes + filename
+      const cd = cat(
+        new Uint8Array([0x50,0x4B,0x01,0x02]),
+        new Uint8Array([0x1E,0x03]), u16(20), Z2, Z2,
+        TM, DT, CRC, SZ, SZ, NL,
+        Z2,           // extra field length
+        Z2,           // file comment length
+        Z2,           // disk number start
+        Z2,           // internal file attributes
+        Z4,           // external file attributes
+        u32(localOff),
+        name,
+      );
+
+      locals.push(lh, data);
+      cdirs.push(cd);
+      localOff += lh.length + data.length;
     }
-    const cdData = cat(cdirs);
-    const eocd = new Uint8Array([0x50,0x4B,0x05,0x06, 0x00,0x00,0x00,0x00, ...w16(entries.length),...w16(entries.length),...w32(cdData.length),...w32(off),0x00,0x00]);
-    return cat([...locals, cdData, eocd]);
+
+    const cdData = cat(...cdirs);
+    const eocd = cat(
+      new Uint8Array([0x50,0x4B,0x05,0x06]),
+      Z2, Z2,
+      u16(entries.length), u16(entries.length),
+      u32(cdData.length), u32(localOff),
+      Z2,
+    );
+    return cat(...locals, cdData, eocd);
   }
 
   // ── Main Export ──────────────────────────────────────────

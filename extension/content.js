@@ -117,67 +117,97 @@
   }
 
   // Pure-JS ZIP builder (STORE, no compression). No external dependencies.
+  // Each section is written out explicitly so byte counts are easy to verify.
   function makeZip(entries) {
-    // entries: [{ name: string, data: Uint8Array }]
+    // CRC-32
     const T = new Uint32Array(256);
     for (let i = 0; i < 256; i++) {
       let c = i;
       for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
       T[i] = c >>> 0;
     }
-    function crc32(buf) {
+    const crc32 = buf => {
       let c = 0xFFFFFFFF;
       for (let i = 0; i < buf.length; i++) c = T[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
       return (c ^ 0xFFFFFFFF) >>> 0;
-    }
-    function w16(n) { return [n & 0xFF, (n >> 8) & 0xFF]; }
-    function w32(n) { const u = n >>> 0; return [u & 0xFF, (u >> 8) & 0xFF, (u >> 16) & 0xFF, (u >> 24) & 0xFF]; }
-    function concat(arrays) {
-      const total = arrays.reduce((s, a) => s + a.length, 0);
-      const out = new Uint8Array(total);
+    };
+
+    // Little-endian helpers — return Uint8Array so concat is type-consistent
+    const u16 = n => new Uint8Array([n & 0xFF, (n >> 8) & 0xFF]);
+    const u32 = n => { const v = n >>> 0; return new Uint8Array([v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF]); };
+    const Z2  = new Uint8Array(2);   // 2 zero bytes (reusable; set() copies values)
+    const Z4  = new Uint8Array(4);   // 4 zero bytes
+
+    const cat = (...parts) => {
+      const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
       let pos = 0;
-      for (const a of arrays) { out.set(a, pos); pos += a.length; }
+      for (const p of parts) { out.set(p, pos); pos += p.length; }
       return out;
-    }
+    };
 
     const enc = new TextEncoder();
     const now = new Date();
-    const dt = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
-    const tm = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const DT = u16(dosDate);
+    const TM = u16(dosTime);
 
     const locals = [];
     const cdirs  = [];
-    let off = 0;
+    let localOff = 0;
 
     for (const e of entries) {
       const name = enc.encode(e.name);
       const data = e.data;
-      const crc  = crc32(data);
-      const sz   = data.length;
+      const CRC  = u32(crc32(data));
+      const SZ   = u32(data.length);
+      const NL   = u16(name.length);
+      const OFF  = u32(localOff);
 
-      const lh = new Uint8Array([
-        0x50,0x4B,0x03,0x04, 0x14,0x00, 0x00,0x00, 0x00,0x00,
-        ...w16(tm), ...w16(dt), ...w32(crc), ...w32(sz), ...w32(sz),
-        ...w16(name.length), 0x00,0x00, ...name,
-      ]);
-      const cd = new Uint8Array([
-        0x50,0x4B,0x01,0x02, 0x1E,0x03, 0x14,0x00, 0x00,0x00, 0x00,0x00,
-        ...w16(tm), ...w16(dt), ...w32(crc), ...w32(sz), ...w32(sz),
-        ...w16(name.length), 0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x00,0x00,0x00,
-        ...w32(off), ...name,
-      ]);
+      // Local file header: 30 bytes fixed + filename
+      //   PK\x03\x04  ver=20  flags=0  comp=0  time  date  crc  csize  usize  namelen  extralen  name
+      const lh = cat(
+        new Uint8Array([0x50,0x4B,0x03,0x04]), u16(20), Z2, Z2,
+        TM, DT, CRC, SZ, SZ, NL, Z2,
+        name,
+      );
+
+      // Central directory entry: 46 bytes fixed + filename
+      //   PK\x01\x02  verbymade=0x031E  verneed=20  flags=0  comp=0
+      //   time  date  crc  csize  usize  namelen  extralen  commentlen
+      //   diskstart  iattr  eattr(4)  localoffset  name
+      const cd = cat(
+        new Uint8Array([0x50,0x4B,0x01,0x02]),
+        new Uint8Array([0x1E,0x03]),  // version made by
+        u16(20),                      // version needed
+        Z2, Z2,                       // flags, compression
+        TM, DT, CRC, SZ, SZ, NL,
+        Z2,                           // extra field length
+        Z2,                           // file comment length
+        Z2,                           // disk number start
+        Z2,                           // internal file attributes
+        Z4,                           // external file attributes
+        OFF,                          // relative offset of local header
+        name,
+      );
+
       locals.push(lh, data);
       cdirs.push(cd);
-      off += lh.length + sz;
+      localOff += lh.length + data.length;
     }
 
-    const cdData = concat(cdirs);
-    const eocd = new Uint8Array([
-      0x50,0x4B,0x05,0x06, 0x00,0x00, 0x00,0x00,
-      ...w16(entries.length), ...w16(entries.length),
-      ...w32(cdData.length), ...w32(off), 0x00,0x00,
-    ]);
-    return concat([...locals, cdData, eocd]);
+    const cdData = cat(...cdirs);
+
+    // End of central directory: 22 bytes
+    const eocd = cat(
+      new Uint8Array([0x50,0x4B,0x05,0x06]),
+      Z2, Z2,                           // disk number, start disk
+      u16(entries.length), u16(entries.length),
+      u32(cdData.length), u32(localOff),
+      Z2,                               // comment length
+    );
+
+    return cat(...locals, cdData, eocd);
   }
 
   async function runExport(options) {
