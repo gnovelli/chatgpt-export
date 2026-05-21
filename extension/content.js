@@ -465,28 +465,36 @@
           for (var f = 0; f < fileIds.length; f++) {
             var fid   = fileIds[f];
             var fname = fileAttachments[fid].name;
+            var fileData;
             try {
               var fresp = await fetchRetry(CONFIG.BASE_URL + '/files/' + fid + '/download', headers);
-              var ct = fresp.headers.get('content-type');
-              var fileData;
-              if (ct && ct.includes('application/json')) {
+              var ct = fresp.headers.get('content-type') || '';
+              log('  [' + fid.slice(0,12) + '…] HTTP ' + fresp.status + ' ct=' + ct.split(';')[0]);
+              if (ct.includes('application/json')) {
                 var jdata = await fresp.json();
                 if (jdata.download_url) {
                   var dlResp = await fetch(jdata.download_url);
+                  log('    redirect HTTP ' + dlResp.status);
                   fileData = new Uint8Array(await dlResp.arrayBuffer());
+                } else {
+                  log('    no download_url in response: ' + JSON.stringify(jdata).slice(0,120));
                 }
               } else {
                 fileData = new Uint8Array(await fresp.arrayBuffer());
               }
-              if (fileData) {
+              if (fileData && fileData.length > 0) {
                 zipEntries.push({ name: 'attachments/' + fname, data: fileData });
                 downloaded++;
+                log('  ✓ ' + fname + ' (' + Math.round(fileData.length / 1024) + ' KB)');
+              } else {
+                log('  ✗ ' + fname + ': empty response');
+                attachErrors++;
               }
             } catch (e) {
+              log('  ✗ ' + fname + ': ' + e.message);
               attachErrors++;
             }
             sendMsg('export-progress', { current: f + 1, total: fileIds.length });
-            log('(' + (f + 1) + '/' + fileIds.length + ') ' + fname);
             await sleep(CONFIG.DELAY_ATTACHMENTS);
           }
           log('Attachments: ' + downloaded + ' OK, ' + attachErrors + ' failed.');
