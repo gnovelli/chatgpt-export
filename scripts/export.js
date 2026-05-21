@@ -128,10 +128,18 @@
   }
 
   function formatConvDate(unixSeconds) {
+    if (!unixSeconds) return 'unknown';
     const d = new Date(unixSeconds * 1000);
+    if (isNaN(d.getTime())) return 'unknown';
     return d.getFullYear().toString() +
       String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
+  }
+
+  function safeISODate(unixSeconds) {
+    if (!unixSeconds) return null;
+    const d = new Date(unixSeconds * 1000);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
   function triggerDownload(blob, filename) {
@@ -345,8 +353,8 @@
       from: fromIdx + approxStart + 1,
       to: absTo,
       total: serverTotal,
-      first_conv_date: toExport.length > 0 ? new Date(toExport[0].create_time * 1000).toISOString() : null,
-      last_conv_date: toExport.length > 0 ? new Date(toExport[toExport.length - 1].create_time * 1000).toISOString() : null,
+      first_conv_date: toExport.length > 0 ? safeISODate(toExport[0].create_time) : null,
+      last_conv_date: toExport.length > 0 ? safeISODate(toExport[toExport.length - 1].create_time) : null,
     },
     conversation_count: fullConversations.length,
     attachment_count: Object.keys(fileAttachments).length,

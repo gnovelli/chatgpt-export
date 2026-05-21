@@ -104,10 +104,18 @@
   }
 
   function formatConvDate(unixSeconds) {
+    if (!unixSeconds) return 'unknown';
     var d = new Date(unixSeconds * 1000);
+    if (isNaN(d.getTime())) return 'unknown';
     return d.getFullYear().toString() +
       String(d.getMonth() + 1).padStart(2, '0') +
       String(d.getDate()).padStart(2, '0');
+  }
+
+  function safeISODate(unixSeconds) {
+    if (!unixSeconds) return null;
+    var d = new Date(unixSeconds * 1000);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
   function sleep(ms) {
@@ -384,8 +392,8 @@
       workspace_account_id: accountId || null,
       export_range: {
         total: allMeta.length,
-        first_conv_date: allMeta.length > 0 ? new Date(allMeta[0].create_time * 1000).toISOString() : null,
-        last_conv_date: allMeta.length > 0 ? new Date(allMeta[allMeta.length - 1].create_time * 1000).toISOString() : null,
+        first_conv_date: allMeta.length > 0 ? safeISODate(allMeta[0].create_time) : null,
+        last_conv_date: allMeta.length > 0 ? safeISODate(allMeta[allMeta.length - 1].create_time) : null,
       },
       conversation_count: conversations.length,
       attachment_count: Object.keys(fileAttachments).length,
