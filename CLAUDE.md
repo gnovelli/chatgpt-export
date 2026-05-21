@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Unreleased
 _(add entries here as work progresses)_
 
-### 2026-05-21
+### v1.0.1 — 2026-05-21
 - **`e9eb53c`** — Filename date range now includes time (`YYYYMMDD-HHmmss`) for both first and last conversation, not just date
 - **`a0d6987`** — Attachment count shown in popup stats panel before download phase begins
 - **`8ea1993`** — Detailed per-file logging during attachment download (HTTP status, content-type, error reason) to aid debugging
@@ -20,7 +20,7 @@ _(add entries here as work progresses)_
 - **`08ed33f`** — Fix `totalCount is not defined`: variable was renamed `serverTotal` in the listing section but stale references remained in export-building and summary code; also fix `toIdx` (now relative) used in absolute comparisons via `absTo = toIdx + approxStart`
 - **`70425ba`** — Partial export with smart pagination: range inputs (from/to, oldest-first), fetch only the API pages overlapping the range (2 pages instead of 8 for a batch of 100 out of 800), persistent history tracking in `chrome.storage.local` / `localStorage`, "Continue from next batch" shortcut, filename encodes export timestamp + first/last conversation datetime, fix missing `storage`+`tabs` manifest permissions
 
-### 2026-05-20 — Initial release (`03841a6`)
+### v1.0.0 — 2026-05-20 — Initial release (`03841a6`)
 - Bulk export all ChatGPT conversations including Team/Business workspaces
 - Three delivery formats: browser console script, Chrome extension (MV3), macOS SwiftUI app
 - Handles rate limiting with exponential backoff
