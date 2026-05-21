@@ -153,9 +153,14 @@ document.addEventListener('DOMContentLoaded', () => {
         },
         () => {
           if (chrome.runtime.lastError) {
-            setStatus('Error', 'error');
-            addLog('Cannot connect to the page. Please reload the chatgpt.com tab and try again.');
-            exportBtn.disabled = false;
+            const msg = chrome.runtime.lastError.message || '';
+            // "message port closed" just means the content script didn't call
+            // sendResponse — the export is running fine, ignore it.
+            if (!msg.includes('message port closed')) {
+              setStatus('Error', 'error');
+              addLog('Cannot connect to the page. Please reload the chatgpt.com tab and try again.');
+              exportBtn.disabled = false;
+            }
           }
         }
       );
