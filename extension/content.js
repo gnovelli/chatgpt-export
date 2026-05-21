@@ -294,9 +294,9 @@
         source: 'chatgpt-export (github.com/hoya98/chatgpt-export)',
         workspace_account_id: accountId || null,
         export_range: {
-          from: fromIdx + 1,
-          to: toIdx,
-          total: totalCount,
+          from: fromIdx + approxStart + 1,
+          to: toIdx + approxStart,
+          total: serverTotal,
           first_conv_date: toExport.length > 0 ? new Date(toExport[0].create_time * 1000).toISOString() : null,
           last_conv_date: toExport.length > 0 ? new Date(toExport[toExport.length - 1].create_time * 1000).toISOString() : null,
         },
@@ -349,18 +349,20 @@
         log('Attachments: ' + downloaded + ' downloaded, ' + attachErrors + ' failed.');
       }
 
+      var absTo = toIdx + approxStart;
+
       // Send exported IDs back to popup for persistent storage
       sendMsg('export-ids', {
         ids: exportedIds,
-        total: totalCount,
-        nextFrom: toIdx < totalCount ? toIdx + 1 : null,
+        total: serverTotal,
+        nextFrom: absTo < serverTotal ? absTo + 1 : null,
       });
 
       sendMsg('export-done', {
         conversations: conversations.length,
         attachments: Object.keys(fileAttachments).length,
-        nextFrom: toIdx < totalCount ? toIdx + 1 : null,
-        total: totalCount,
+        nextFrom: absTo < serverTotal ? absTo + 1 : null,
+        total: serverTotal,
       });
 
     } catch (err) {

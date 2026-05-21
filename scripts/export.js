@@ -333,7 +333,8 @@
   // Step 5: Save history and build export
   saveHistory(exportedIds);
   const updatedHistory = loadHistory();
-  log('Progress saved. Total tracked: ' + updatedHistory.length + '/' + totalCount + ' conversations.');
+  const absTo = toIdx + approxStart;
+  log('Progress saved. Total tracked: ' + updatedHistory.length + '/' + serverTotal + ' conversations.');
 
   log('Building export file...');
   const exportData = {
@@ -341,9 +342,9 @@
     source: 'chatgpt-export (github.com/hoya98/chatgpt-export)',
     workspace_account_id: accountId || null,
     export_range: {
-      from: fromIdx + 1,
-      to: toIdx,
-      total: totalCount,
+      from: fromIdx + approxStart + 1,
+      to: absTo,
+      total: serverTotal,
       first_conv_date: toExport.length > 0 ? new Date(toExport[0].create_time * 1000).toISOString() : null,
       last_conv_date: toExport.length > 0 ? new Date(toExport[toExport.length - 1].create_time * 1000).toISOString() : null,
     },
@@ -369,10 +370,10 @@
   if (errors.length > 0) {
     log(errors.length + ' conversations had errors (see export file for details).');
   }
-  if (toIdx < totalCount) {
-    log('Next batch: set EXPORT_FROM: ' + (toIdx + 1) + ', EXPORT_TO: ' + (toIdx + 100));
+  if (absTo < serverTotal) {
+    log('Next batch: set EXPORT_FROM: ' + (absTo + 1) + ', EXPORT_TO: ' + (absTo + 100));
   } else {
-    log('All ' + totalCount + ' conversations exported!');
+    log('All ' + serverTotal + ' conversations exported!');
   }
 
   return {
@@ -380,6 +381,6 @@
     attachments: Object.keys(fileAttachments).length,
     errors: errors.length,
     filename: filename,
-    nextFrom: toIdx < totalCount ? toIdx + 1 : null,
+    nextFrom: absTo < serverTotal ? absTo + 1 : null,
   };
 })();
