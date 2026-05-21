@@ -2,6 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Changelog
+
+### Unreleased
+_(add entries here as work progresses)_
+
+### 2026-05-21
+- **`e9eb53c`** — Filename date range now includes time (`YYYYMMDD-HHmmss`) for both first and last conversation, not just date
+- **`a0d6987`** — Attachment count shown in popup stats panel before download phase begins
+- **`8ea1993`** — Detailed per-file logging during attachment download (HTTP status, content-type, error reason) to aid debugging
+- **`4a26b12`** — Fix corrupt ZIP: central directory entry had 10–11 zero bytes instead of the required 12, shifting the local-header offset field and making the file unopenable
+- **`d4845a0`** — When "Download file attachments" checkbox is active, always produce a `.zip` even if no attachments were detected (previously fell back to `.json` silently)
+- **`821f14a`** — Bundle JSON + all attachments into a single ZIP instead of triggering one download per file (browsers block multiple automatic downloads); pure-JS ZIP builder with no external dependencies
+- **`ed8a647`** — Fix `create_time` handling: field can be Unix timestamp (float) or ISO 8601 string depending on account type; add `toUnixTime()` helper used in sort, `formatConvDate`, `safeISODate`. Add audio attachment detection for `sediment://` asset pointers (TTS/voice output) and `real_time_user_audio_video_asset_pointer` parts (voice user input)
+- **`3676121`** — Fix false "Error" shown at export start: `chrome.tabs.sendMessage` response callback fires with `lastError = "message port closed"` when content script doesn't call `sendResponse`; ignore that specific error, only surface real connection failures
+- **`baa9fd2`** — Fix `Invalid time value` exception: conversations with fetch errors have no `create_time`; `safeISODate()` and `formatConvDate()` now return `null`/`"unknown"` instead of throwing
+- **`08ed33f`** — Fix `totalCount is not defined`: variable was renamed `serverTotal` in the listing section but stale references remained in export-building and summary code; also fix `toIdx` (now relative) used in absolute comparisons via `absTo = toIdx + approxStart`
+- **`70425ba`** — Partial export with smart pagination: range inputs (from/to, oldest-first), fetch only the API pages overlapping the range (2 pages instead of 8 for a batch of 100 out of 800), persistent history tracking in `chrome.storage.local` / `localStorage`, "Continue from next batch" shortcut, filename encodes export timestamp + first/last conversation datetime, fix missing `storage`+`tabs` manifest permissions
+
+### 2026-05-20 — Initial release (`03841a6`)
+- Bulk export all ChatGPT conversations including Team/Business workspaces
+- Three delivery formats: browser console script, Chrome extension (MV3), macOS SwiftUI app
+- Handles rate limiting with exponential backoff
+- Detects file attachments via `metadata.attachments` and `file-service://` asset pointers
+- Archived conversations support
+
 ## What this project is
 
 A ChatGPT bulk conversation exporter with three delivery formats, all sharing the same core export algorithm:
